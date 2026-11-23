@@ -40,9 +40,18 @@ The existing administrator can invite other staff from **Staff accounts**, assig
 
 Run `supabase/tests/workflow.sql` as the project owner against an isolated test database. The script rolls back its synthetic fixture rows.
 
+## Hospital operations
+
+- **Appointments:** front desk books patients by date, time (WAT) and clinic, then marks arrivals or cancellations. Nurses and doctors can view the roster.
+- **Wards and beds:** administrators create beds. Nurses record admissions and releases. The database prevents two active admissions for the same patient or bed.
+- **Inventory:** pharmacy records stock receipts and issues against a reference. OCTO flags low stock and rejects issues exceeding available units. Stock movements are entered separately from dispensing.
+- **Daily report:** cashiers and administrators can review Lagos-day visit totals, urgent visits and verified card and pharmacy receipts.
+
+The [Vertikal HMS feature overview](https://www.vertikalsystems.com/en/products/pm/hospital-management-system.htm) informed these additions. Claims submission, dedicated radiology and medical-device integrations require separate workflows.
+
 ## Pilot boundaries
 
-Payments record cash, POS or transfer that staff have verified manually. The pilot does not collect funds, run automated clinical decisions, capture fingerprints, send reports by email, or expose patient data through the public site. A maternity note is supported, while a complete antenatal schedule and inpatient/bed management are separate modules. The workspace needs connectivity.
+Payments record cash, POS or transfer that staff have verified manually. The pilot does not collect funds, run automated clinical decisions, capture fingerprints, send reports by email, or expose patient data through the public site. A maternity note is supported, while a complete antenatal schedule and advanced inpatient care are separate modules. The workspace needs connectivity.
 
 Before use with real records, obtain the hospital's clinical and privacy review, confirm deployment region and data-transfer arrangements, and complete the applicable Nigeria Data Protection Act assessment. Verify backup and restore for Postgres and private files, enforce staff MFA, define clinical corrections and downtime procedures, and add production-grade access auditing. The current role model limits lab and pharmacy records to patients with relevant orders. Clinical users can view the history their role permits within their hospital. Current auditing records the author and time of saved clinical events.
 

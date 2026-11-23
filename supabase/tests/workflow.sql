@@ -6,7 +6,8 @@ insert into auth.users(id,email) values
  ('10000000-0000-0000-0000-000000000004','octo-test-lab@example.invalid'),
  ('10000000-0000-0000-0000-000000000005','octo-test-pharmacy@example.invalid'),
  ('10000000-0000-0000-0000-000000000006','octo-test-surgeon@example.invalid'),
- ('10000000-0000-0000-0000-000000000007','octo-test-offboarded@example.invalid');
+ ('10000000-0000-0000-0000-000000000007','octo-test-offboarded@example.invalid'),
+ ('10000000-0000-0000-0000-000000000008','octo-test-admin@example.invalid');
 insert into public.staff(id,name,email,role,active) values
  ('10000000-0000-0000-0000-000000000001','Test cashier','octo-test-cashier@example.invalid','cashier',true),
  ('10000000-0000-0000-0000-000000000002','Test nurse','octo-test-nurse@example.invalid','nurse',true),
@@ -14,10 +15,11 @@ insert into public.staff(id,name,email,role,active) values
  ('10000000-0000-0000-0000-000000000004','Test lab','octo-test-lab@example.invalid','lab',true),
  ('10000000-0000-0000-0000-000000000005','Test pharmacy','octo-test-pharmacy@example.invalid','pharmacy',true),
  ('10000000-0000-0000-0000-000000000006','Test surgeon','octo-test-surgeon@example.invalid','surgeon',true),
- ('10000000-0000-0000-0000-000000000007','Test offboarded','octo-test-offboarded@example.invalid','doctor',false);
+ ('10000000-0000-0000-0000-000000000007','Test offboarded','octo-test-offboarded@example.invalid','doctor',false),
+ ('10000000-0000-0000-0000-000000000008','Test admin','octo-test-admin@example.invalid','admin',true);
 set local role authenticated;
 do $$
-declare p uuid; v uuid; lab uuid; drug uuid; surgery uuid; other_patient uuid; urgent_visit uuid; returning_visit uuid;
+declare p uuid; v uuid; lab uuid; drug uuid; surgery uuid; other_patient uuid; urgent_visit uuid; returning_visit uuid; bed uuid; admission uuid; item uuid; booking uuid;
 begin
  perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000001',true);
  insert into public.patients(name) values ('Fictional workflow patient') returning id into p;
@@ -93,6 +95,35 @@ begin
  if not exists(select 1 from public.visit_stages(p) s where s.id=returning_visit and s.stage->>'paid'='true') then raise exception 'Returning patient card state missing'; end if;
  perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000002',true);
  insert into public.events(visit_id,kind,details) values(returning_visit,'vitals','{"weight":"68","height":"170","temperature":"36.4","pulse":"76","bp":"118/76"}');
+
+ perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000008',true);
+ insert into public.beds(ward,label) values('Pilot ward','Test bed') returning id into bed;
+ if not exists(select 1 from public.daily_operations((now() at time zone 'Africa/Lagos')::date) r where r.card_payments=3500 and r.pharmacy_payments=1500) then raise exception 'Receipt report incorrect'; end if;
+ insert into public.appointments(patient_id,starts_at,clinic) values(p,now()+interval '1 day','Maternity') returning id into booking;
+ update public.appointments set status='Arrived' where id=booking;
+ if not exists(select 1 from public.appointments where id=booking and status='Arrived') then raise exception 'Booking status missing'; end if;
+
+ perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000002',true);
+ insert into public.admissions(patient_id,bed_id) values(p,bed) returning id into admission;
+ begin
+  insert into public.admissions(patient_id,bed_id) values(other_patient,bed);
+  raise exception 'Double bed allocation accepted';
+ exception when unique_violation then null;
+ end;
+ update public.admissions set released_at=now() where id=admission;
+ insert into public.admissions(patient_id,bed_id) values(other_patient,bed);
+
+ perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000005',true);
+ insert into public.stock_items(name,reorder_level) values('Synthetic stock item',3) returning id into item;
+ insert into public.stock_movements(item_id,quantity,reference) values(item,10,'TEST-IN'),(item,-7,'TEST-OUT');
+ if not exists(select 1 from public.stock_balance b where b.id=item and b.quantity=3) then raise exception 'Stock balance incorrect'; end if;
+ begin
+  insert into public.stock_movements(item_id,quantity,reference) values(item,-4,'TEST-OVER');
+  raise exception 'Negative stock accepted';
+ exception when raise_exception then
+  if sqlerrm <> 'Insufficient stock' then raise; end if;
+ end;
+ if exists(select 1 from public.appointments) or exists(select 1 from public.daily_operations(current_date)) then raise exception 'Pharmacy can see other department data'; end if;
 
  perform set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000007',true);
  if exists(select 1 from public.patients) or exists(select 1 from public.recent_queue()) then raise exception 'Suspended staff retained access'; end if;

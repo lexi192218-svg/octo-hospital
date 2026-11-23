@@ -223,6 +223,141 @@ function history(event) {
   const fields = Object.entries(event.details).map(([key,value])=>'<dt>'+escape(key==="bmi"?"BMI":label(key))+'</dt><dd>'+escape(key==="amount"?money(value):value)+'</dd>').join("");
   return '<li><b>'+steps[event.kind].title+'</b> <time>'+date(event.recorded_at)+'</time>'+(event.actor?' <span class="order-id" title="Staff identifier">· '+escape(event.actor.slice(0,8))+'</span>':'')+(event.parent_id?'<small class="order-id"> · Order '+event.parent_id.slice(0,8)+'</small>':'')+'<dl>'+fields+'</dl></li>';
 }
+const opsRoles = {
+  appointments:["admin","cashier","nurse","doctor"],
+  wards:["admin","nurse","doctor"],
+  inventory:["admin","pharmacy"],
+  reports:["admin","cashier"],
+};
+const opsLabels = {appointments:"Appointments",wards:"Wards & beds",inventory:"Inventory",reports:"Daily report"};
+const clinics = ["General outpatient","Maternity","Surgery","Diagnostics"];
+const lagosDay = () => new Intl.DateTimeFormat("sv-SE",{timeZone:"Africa/Lagos"}).format(new Date());
+let opsData = {};
+let reportDay = lagosDay();
+
+async function opsRows(table, query="") {
+  if (!state.demo) return database(table+"?"+query);
+  const rows = demo[table] ??= [];
+  if (table==="stock_balance")
+    return demo.stock_items?.map(item=>({...item,quantity:(demo.stock_movements||[]).filter(m=>m.item_id===item.id).reduce((n,m)=>n+m.quantity,0)})) || [];
+  if (table==="admissions") return rows.filter(row=>!row.released_at);
+  return rows;
+}
+async function loadOperations(page) {
+  if (!opsRoles[page]?.includes(state.role)) throw new Error("This department is unavailable for your role.");
+  if (page==="appointments") opsData.appointments=await opsRows("appointments","select=*&order=starts_at.desc&limit=100");
+  if (page==="wards") {
+    [opsData.beds,opsData.admissions]=await Promise.all([
+      opsRows("beds","select=*&order=ward,label"),
+      opsRows("admissions","select=*&released_at=is.null"),
+    ]);
+  }
+  if (page==="inventory") opsData.inventory=await opsRows("stock_balance","select=*&order=name");
+  if (page==="reports") {
+    if (!state.demo) opsData.report=(await database("rpc/daily_operations",{method:"POST",data:{day:reportDay}}))[0];
+    else {
+      const inDay=value=>new Date(Date.parse(value)+3600000).toISOString().startsWith(reportDay);
+      const visits=demo.visits.filter(v=>inDay(v.opened_at));
+      const sum=kind=>demo.events.filter(e=>e.kind===kind&&inDay(e.recorded_at)).reduce((total,e)=>total+Number(e.details.amount),0);
+      opsData.report={visits:visits.length,urgent_visits:visits.filter(v=>v.urgent).length,card_payments:sum("registration_payment"),pharmacy_payments:sum("pharmacy_payment")};
+    }
+  }
+}
+function patientName(id) {
+  const patient=state.patients.find(p=>p.id===id) || demo?.patients.find(p=>p.id===id);
+  return escape(patient ? patient.name+" · "+card(patient.card) : "Patient record");
+}
+function opsTable(headers, rows) {
+  return '<div class="table-wrap"><table><thead><tr>'+headers.map(h=>'<th scope="col">'+h+'</th>').join("")+'</tr></thead><tbody>'+
+    (rows.length?rows.map(row=>'<tr>'+row.map(cell=>'<td>'+cell+'</td>').join("")+'</tr>').join(""):'<tr><td colspan="'+headers.length+'">No records yet.</td></tr>')+'</tbody></table></div>';
+}
+function opsForm(id,title,fields,button) {
+  return '<section class="panel"><h2>'+title+'</h2><form id="'+id+'" class="gridform">'+fields+'<div class="actions wide"><button class="button">'+button+'</button></div></form></section>';
+}
+function opsSelect(name,caption,options) {
+  return '<label>'+caption+'<select name="'+name+'" required><option value="">Choose an option</option>'+
+    options.map(([v,l])=>'<option value="'+escape(v)+'">'+l+'</option>').join("")+'</select></label>';
+}
+function opsButton(action,id,caption) {
+  return '<button class="button line" data-action="'+action+'" data-value="'+escape(id)+'">'+caption+'</button>';
+}
+function operationsPage() {
+  const patient=opsSelect("patient_id","Patient",state.patients.map(p=>[p.id,patientName(p.id)]));
+  const desk=adminDesk.includes(state.role);
+  if (state.page==="appointments")
+    return '<div class="stack">'+(desk?opsForm("ops-book","Book appointment",patient+
+      '<label>Date and time (WAT)<input type="datetime-local" name="starts_at" required></label>'+
+      field(["clinic","Clinic",clinics]),"Book appointment"):"")+
+      '<section class="panel"><h2>Appointment register</h2>'+opsTable(["Patient","Time (WAT)","Clinic","Status","Action"],
+      (opsData.appointments||[]).map(a=>[patientName(a.patient_id),date(a.starts_at),escape(a.clinic),escape(a.status),desk&&a.status==="Booked"?
+      opsButton("ops-arrive",a.id,"Mark arrived")+" "+opsButton("ops-cancel",a.id,"Cancel booking"):""]))+'</section></div>';
+  if (state.page==="wards") {
+    const active=opsData.admissions||[];
+    const beds=opsData.beds||[];
+    return '<div class="stack">'+(state.role==="admin"?opsForm("ops-bed","Add bed",field(["ward","Ward"])+field(["label","Bed label"]),"Add bed"):"")+
+      (state.role==="nurse"?opsForm("ops-admit","Admit patient",patient+opsSelect("bed_id","Available bed",beds.filter(b=>!active.some(a=>a.bed_id===b.id)).map(b=>[b.id,escape(b.ward+" · "+b.label)])),"Admit patient"):"")+
+      '<section class="panel"><h2>Bed occupancy</h2>'+opsTable(["Ward","Bed","Occupancy","Action"],beds.map(b=>{
+        const occupant=active.find(a=>a.bed_id===b.id);
+        return [escape(b.ward),escape(b.label),occupant?patientName(occupant.patient_id):"Available",
+          occupant&&state.role==="nurse"?opsButton("ops-release",occupant.id,"Release bed"):""];
+      }))+'</section></div>';
+  }
+  if (state.page==="inventory") {
+    const items=opsData.inventory||[];
+    const writable=state.role==="pharmacy";
+    return '<div class="stack">'+(writable?opsForm("ops-item","Add stock item",field(["name","Item name"])+
+      '<label>Reorder level<input type="number" name="reorder_level" min="0" max="1000000" required></label>',"Add stock item")+
+      opsForm("ops-stock","Record stock movement",opsSelect("item_id","Item",items.map(i=>[i.id,escape(i.name)]))+
+      field(["direction","Movement",["Stock in","Stock out"]])+field(["quantity","Units","number"])+field(["reference","Movement reference"]),"Save movement"):"")+
+      '<section class="panel"><h2>Stock balances</h2>'+opsTable(["Item","Units","Reorder level","Status"],items.map(i=>[escape(i.name),escape(i.quantity),escape(i.reorder_level),Number(i.quantity)<=i.reorder_level?"Reorder":"In stock"]))+'</section></div>';
+  }
+  const summary=opsData.report||{};
+  return '<div class="stack">'+opsForm("ops-report","Select report day",'<label>Day (WAT)<input type="date" name="day" required value="'+escape(reportDay)+'"></label>',"Run report")+
+    '<section class="panel"><h2>Visits and verified receipts</h2>'+opsTable(["Metric","Total"],[
+      ["Visits opened",summary.visits??0],["Urgent visits",summary.urgent_visits??0],
+      ["Card receipts",money(summary.card_payments??0)],["Pharmacy receipts",money(summary.pharmacy_payments??0)]])+'</section></div>';
+}
+async function opsInsert(table,data) {
+  if (!state.demo) return database(table,{method:"POST",data});
+  const rows=demo[table]??=[];
+  if (table==="appointments"&&rows.some(row=>row.patient_id===data.patient_id&&row.starts_at===data.starts_at))
+    throw new Error("This patient already has a booking at that time.");
+  if (table==="beds"&&rows.some(row=>row.ward===data.ward&&row.label===data.label))
+    throw new Error("This bed already exists.");
+  if (table==="admissions"&&rows.some(row=>!row.released_at&&(row.bed_id===data.bed_id||row.patient_id===data.patient_id)))
+    throw new Error("The bed or patient already has an active admission.");
+  if (table==="stock_items"&&rows.some(row=>row.name===data.name)) throw new Error("This item already exists.");
+  if (table==="stock_movements") {
+    const movements=rows.filter(row=>row.item_id===data.item_id);
+    if (movements.some(row=>row.reference===data.reference)) throw new Error("This movement reference already exists.");
+    if (movements.reduce((total,row)=>total+row.quantity,0)+data.quantity<0) throw new Error("Insufficient stock.");
+  }
+  rows.push({id:crypto.randomUUID(),...(table==="appointments"?{status:"Booked"}:{}),...data});
+}
+async function opsUpdate(table,id,data) {
+  if (!state.demo) {
+    const changed=await database(table+"?id=eq."+encodeURIComponent(id),{method:"PATCH",data,prefer:"return=representation"});
+    if (!changed.length) throw new Error("This record has already changed. Refresh and try again.");
+  } else Object.assign(demo[table].find(row=>row.id===id),data);
+  await loadOperations(state.page);
+  render();
+  notice("Saved successfully.",true);
+}
+async function saveOperations(id,data) {
+  switch(id) {
+    case "ops-book":
+      await opsInsert("appointments",{...data,starts_at:new Date(data.starts_at+"+01:00").toISOString()});break;
+    case "ops-bed": await opsInsert("beds",data);break;
+    case "ops-admit": await opsInsert("admissions",data);break;
+    case "ops-item": await opsInsert("stock_items",{...data,reorder_level:Number(data.reorder_level)});break;
+    case "ops-stock": await opsInsert("stock_movements",{item_id:data.item_id,reference:data.reference,quantity:Number(data.quantity)*(data.direction==="Stock in"?1:-1)});break;
+    case "ops-report": reportDay=data.day;break;
+  }
+  await loadOperations(state.page);
+  render();
+  notice(id==="ops-report"?"Report updated.":"Saved successfully.",true);
+}
+
 function render() {
   const desk = adminDesk.includes(state.role);
   const person = state.patients.find(p=>p.id===state.person) ?? state.latest.find(q=>q.patient_id===state.person)?.patient;
@@ -231,8 +366,8 @@ function render() {
   const urgent = waiting.filter(v=>v.urgent).length;
   const query = state.search.toLowerCase();
   const people = state.demo && query ? state.patients.filter(p=>[p.name,card(p.card),String(p.card)].some(v=>v.toLowerCase().includes(query))) : state.patients;
-  const title = state.page==="staff"?"Staff accounts":state.page==="profile"?"My staff profile":state.page==="patients"?"Patient directory":"Department queue";
-  const menu = [["queue","Department queue"],["patients","Patient directory"],["profile","My profile"],...(state.role==="admin"?[["staff","Staff accounts"]]:[])];
+  const title = opsLabels[state.page] ?? (state.page==="staff"?"Staff accounts":state.page==="profile"?"My staff profile":state.page==="patients"?"Patient directory":"Department queue");
+  const menu = [["queue","Department queue"],["patients","Patient directory"],...Object.entries(opsLabels).filter(([key])=>opsRoles[key].includes(state.role)),["profile","My profile"],...(state.role==="admin"?[["staff","Staff accounts"]]:[])];
   root.innerHTML = '<div class="shell"><aside class="sidebar">'+brand+'<div><strong>'+escape(state.staff?.name || "Practice workspace")+'</strong><br><small>'+demoRoles[state.role]+'</small></div>'+
     (state.demo?'<label>Practice as<select id="role">'+Object.entries(demoRoles).map(([k,v])=>'<option value="'+k+'" '+(k===state.role?"selected":"")+'>'+v+'</option>').join("")+'</select></label>':"")+
     '<nav aria-label="Workspace">'+menu.map(([k,v])=>'<button data-action="page" data-value="'+k+'" aria-current="'+(state.page===k?"page":"false")+'">'+v+'</button>').join("")+
@@ -240,7 +375,7 @@ function render() {
     '<main><header class="workhead"><div><p class="eyebrow">'+department[state.role].toUpperCase()+'</p><h1>'+title+'</h1></div><button class="button line" data-action="refresh">Refresh</button></header>'+
     (state.demo?'<p class="banner">Practice mode · Use fictional information only. This workspace does not send records to the hospital database.</p>':"")+
     '<p id="message" class="message" role="status"></p>'+
-    (state.page==="staff" ? staffPage() : state.page==="profile" ? profilePage() :
+    (state.page==="staff" ? staffPage() : state.page==="profile" ? profilePage() : opsLabels[state.page] ? operationsPage() :
       '<div class="stat-grid"><div class="panel"><strong>'+waiting.length+'</strong>In this queue</div><div class="panel"><strong>'+urgent+'</strong>Urgent in this queue</div><div class="panel"><strong>'+state.latest.length+'</strong>Recent visits</div></div>'+
       '<div class="workgrid"><section class="panel"><div class="panel-head"><h2>'+(state.page==="queue"?"Queue":"Find a patient")+'</h2>'+(desk?'<button class="button line" data-action="activity" data-value="new-patient">New patient</button>':"")+'</div>'+
       (state.page==="patients"?'<form id="search" class="stack"><label>Name or card number<input name="search" value="'+escape(state.search)+'" placeholder="e.g. OCT-01001"></label><button class="button line">Search</button></form>':"")+
@@ -299,6 +434,7 @@ function reset() {
   ++requestGeneration;
   Object.assign(state,{token:null,refresh:null,expires:0,staff:null,demo:false,role:"admin",page:"queue",patients:[],latest:[],person:null,visits:[],events:[],status:{},refs:[],picked:null,search:"",activity:null,staffList:[]});
   demo = undefined;
+  opsData={}; reportDay=lagosDay();
   myProfile = {}; myFiles = [];
   signIn();
 }
@@ -320,8 +456,11 @@ root.addEventListener("click", event=>{
     switch(action) {
       case "demo": state.demo=true; demo=seedDemo(); await reload(); render(); break;
       case "logout": try { if (state.token) await api("/auth/v1/logout",{method:"POST"}); } finally { reset(); } break;
-      case "refresh": if (state.page==="staff") await loadStaff(); else if (state.page==="profile") await loadProfile(); else await reload(); render(); break;
-      case "page": state.activity=null; state.page=value; if (value==="staff") await loadStaff(); else if (value==="profile") await loadProfile(); else await reload(); render(); break;
+      case "refresh": if (state.page==="staff") await loadStaff(); else if (state.page==="profile") await loadProfile(); else if (opsLabels[state.page]) {await reload(); await loadOperations(state.page);} else await reload(); render(); break;
+      case "page": state.activity=null; state.page=value; if (value==="staff") await loadStaff(); else if (value==="profile") await loadProfile(); else if (opsLabels[value]) {state.search=""; await reload(); await loadOperations(value);} else await reload(); render(); break;
+      case "ops-arrive": await opsUpdate("appointments",value,{status:"Arrived"}); break;
+      case "ops-cancel": await opsUpdate("appointments",value,{status:"Cancelled"}); break;
+      case "ops-release": await opsUpdate("admissions",value,{released_at:new Date().toISOString()}); break;
       case "patient": state.activity=null; await loadPatient(value,button.dataset.visit); render(); break;
       case "activity": state.activity=value; render(); document.querySelector(".gridform input,.gridform select,.gridform textarea,#new-visit input")?.focus(); break;
       case "print": {
@@ -371,6 +510,7 @@ root.addEventListener("submit", event=>{
       await enterStaff();
       return;
     }
+    if (form.id.startsWith("ops-")) {await saveOperations(form.id,data); return;}
     if (form.id==="profile") {
       if (state.demo) demo.profile = data;
       else if (myProfile) await database("staff_profiles?id=eq."+state.staff.id,{method:"PATCH",data});
