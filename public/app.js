@@ -11,7 +11,8 @@ const payments = [["amount","Amount (₦)","money"],["method","Payment method",[
 const steps = {
   registration_payment:{label:"Confirm card payment", title:"Card payment", roles:adminDesk, fields:payments},
   vitals:{label:"Take vitals", title:"Vital signs", roles:["nurse"], fields:[["weight","Weight (kg)","decimal"],["height","Height (cm)","decimal"],["temperature","Temperature (°C)","decimal"],["pulse","Pulse (bpm)","number"],["bp","Blood pressure (mmHg)", "bp"]]},
-  consultation:{label:"Record consultation", title:"Consultation", roles:["doctor"], fields:[["complaint","Patient complaint","area"],["assessment","Clinical assessment","area"],["plan","Care plan","area"]]},
+  consultation:{label:"General consultation", title:"General consultation", roles:["doctor"], fields:[["complaint","Patient complaint","area"],["assessment","Assessment or diagnosis","area"],["findings","Examination findings (optional)","optional"],["plan","Treatment and follow-up plan","area"]]},
+  medication_given:{label:"Record medicine given",title:"Medicine administered",roles:["doctor"],fields:[["medicine","Medicine name"],["dose","Dose and unit"],["route","Route"],["given_at","Time given (WAT, optional)","optional"],["notes","Administration notes (optional)","optional"]]},
   lab_order:{label:"Request lab test",title:"Lab order",roles:clinicians,fields:[["test","Test name"],["notes","Lab instructions","optional"]]},
   lab_result:{label:"Enter lab result",title:"Lab result",roles:["lab"],parent:"lab_order",fields:[["result","Result and units","area"]]},
   prescription:{label:"Write prescription",title:"Prescription",roles:clinicians,fields:[["medicine","Medication"],["instructions","Dose, route, frequency and duration","area"]]},
@@ -195,6 +196,8 @@ function available(visit) {
       registration_payment:!status.paid,
       vitals:!status.vitals&&(status.paid||visit.urgent),
       consultation:status.vitals||visit.urgent,
+      medication_given:status.consultation,
+      maternity:state.role==="nurse" || status.consultation,
       lab_order:status.consultation,
       prescription:status.consultation,
       surgery_referral:status.consultation,
@@ -220,7 +223,7 @@ function workflowForm(visit) {
   return '<form id="event" class="gridform"><h3 class="wide">'+step.label+'</h3>'+linked+step.fields.map(field).join("")+'<div class="actions wide"><button class="button">Save entry</button><button type="button" class="button line" data-action="cancel">Cancel</button></div></form>';
 }
 function history(event) {
-  const fields = Object.entries(event.details).map(([key,value])=>'<dt>'+escape(key==="bmi"?"BMI":label(key))+'</dt><dd>'+escape(key==="amount"?money(value):value)+'</dd>').join("");
+  const fields = Object.entries(event.details).filter(([,value])=>value!=="").map(([key,value])=>'<dt>'+escape(key==="bmi"?"BMI":label(key))+'</dt><dd>'+escape(key==="amount"?money(value):value)+'</dd>').join("");
   return '<li><b>'+steps[event.kind].title+'</b> <time>'+date(event.recorded_at)+'</time>'+(event.actor?' <span class="order-id" title="Staff identifier">· '+escape(event.actor.slice(0,8))+'</span>':'')+(event.parent_id?'<small class="order-id"> · Order '+event.parent_id.slice(0,8)+'</small>':'')+'<dl>'+fields+'</dl></li>';
 }
 const opsRoles = {
@@ -382,7 +385,7 @@ function render() {
       '<div class="record-list">'+(state.page==="queue" ? waiting.map(v=>record(v.patient || state.patients.find(p=>p.id===v.patient_id),v)).join("") : people.map(p=>record(p)).join(""))+
       ((state.page==="queue"?waiting.length:people.length)?"":'<p class="muted">No matching records.</p>')+'</div></section>'+
       '<section class="panel">'+(person?'<div class="visit-head"><div><h2>'+escape(person.name)+'</h2><p class="muted">'+card(person.card)+(person.dob?' · DOB '+escape(person.dob):"")+(person.phone?' · '+escape(person.phone):"")+'</p></div>'+(desk?'<div class="actions">'+(state.status[visit?.id]?.paid?'<button class="button line" data-action="print">Print card</button>':'')+'<button class="button line" data-action="activity" data-value="new-visit">Open visit</button></div>':"")+'</div>':"")+
-      (visit?'<label>Visit<select id="visit">'+state.visits.map(v=>'<option value="'+v.id+'" '+(v.id===visit.id?"selected":"")+'>'+date(v.opened_at)+(v.urgent?" · Urgent":"")+'</option>').join("")+'</select></label><p><span class="tag '+(visit.urgent?"urgent":"")+'">'+stageText(visit,state.status[visit.id])+'</span></p><div class="actions">'+available(visit).map(([k,v])=>'<button class="button line" data-action="activity" data-value="'+k+'">'+v.label+'</button>').join("")+'</div>':"")+
+      (visit?'<label>Visit<select id="visit">'+state.visits.map(v=>'<option value="'+v.id+'" '+(v.id===visit.id?"selected":"")+'>'+date(v.opened_at)+(v.urgent?" · Urgent":"")+'</option>').join("")+'</select></label><p><span class="tag '+(visit.urgent?"urgent":"")+'">'+stageText(visit,state.status[visit.id])+'</span></p><div class="actions">'+available(visit).map(([k,v])=>'<button class="button'+(k==="consultation"?"":" line")+'" data-action="activity" data-value="'+k+'">'+v.label+'</button>').join("")+'</div>':"")+
       workflowForm(visit)+(person&&!state.activity ? '<h3>Patient history</h3>'+(state.events.length?'<ul class="history-list">'+state.events.map(history).join("")+'</ul>':'<p class="muted">No visible entries for this patient yet.</p>'):"")+
       (!person&&!state.activity?'<p class="muted">Select a patient to open their record.</p>':"")+'</section></div>')+'</main></div>';
 }
